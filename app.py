@@ -16,7 +16,29 @@ except Exception as e:
     st.error(f"⚠️ Error en Secrets: {e}")
     st.stop()
 
-# --- 2. PROCESAMIENTO ---
+# --- 2. BARRA LATERAL (CONTROLES INTERACTIVOS) ---
+st.sidebar.title("⚙️ Panel de Control")
+st.sidebar.markdown("Configurá la comparativa histórica")
+
+periodo = st.sidebar.selectbox(
+    "Seleccioná el periodo:", 
+    ["1mo", "3mo", "6mo", "1y", "2y", "5y"], 
+    index=2
+)
+
+benchmarks_dict = {
+    "S&P 500 (SPY)": "SPY",
+    "Nasdaq 100 (QQQ)": "QQQ",
+    "Oro (GLD)": "GLD"
+}
+
+seleccionados = st.sidebar.multiselect(
+    "Comparar mi cartera contra:", 
+    options=list(benchmarks_dict.keys()),
+    default=["S&P 500 (SPY)"]
+)
+
+# --- 3. PROCESAMIENTO DE DATOS ACTUALES ---
 st.title("📈 Mi Portafolio: Nexo CEDEAR -> Wall Street")
 
 try:
@@ -24,57 +46,76 @@ try:
     if records:
         df = pd.DataFrame([r['fields'] for r in records])
         
-        # --- DESCARGA DE PRECIOS SEGURA ---
+        # Descarga de precios actuales
         tickers_eeuu = df['Ticker_EEUU'].unique().tolist()
-        
         with st.spinner('Consultando Wall Street...'):
-            # Usamos auto_adjust=True y forzamos a que sea un DataFrame simple
-            data = yf.download(tickers_eeuu, period="1d", interval="1d", auto_adjust=True)
-            
-            # Si solo hay un ticker, data['Close'] es una Serie. Si hay varios, es un DataFrame.
+            data_now = yf.download(tickers_eeuu, period="1d", auto_adjust=True)
             if len(tickers_eeuu) > 1:
-                precios_hoy = data['Close'].iloc[-1].to_dict()
+                precios_hoy = data_now['Close'].iloc[-1].to_dict()
             else:
-                # Caso especial para un solo ticker
-                ultimo_precio = data['Close'].iloc[-1]
-                precios_hoy = {tickers_eeuu[0]: float(ultimo_precio)}
+                precios_hoy = {tickers_eeuu[0]: float(data_now['Close'].iloc[-1])}
 
-        # --- CÁLCULOS ---
+        # Cálculos del Nexo
         df['Acciones_EEUU'] = df['Cantidad'] / df['Ratio']
-        # Mapeamos los precios asegurándonos de que no haya errores de Ticker
         df['Precio_USD'] = df['Ticker_EEUU'].map(precios_hoy)
         df['Total_USD'] = df['Acciones_EEUU'] * df['Precio_USD']
         
-        # --- DASHBOARD ---
+        # Dashboard Principal
         total_cartera = df['Total_USD'].sum()
-        col1, col2 = st.columns([1, 2])
+        c1, c2 = st.columns([1, 2])
         
-        with col1:
+        with c1:
             st.metric("Patrimonio Total", f"USD {total_cartera:,.2f}")
             fig_pie = px.pie(df, values='Total_USD', names='Ticker Argy', 
-                             hole=0.4, title="Distribución por Activo")
+                             hole=0.4, title="Distribución de Capital")
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        with col2:
-            st.subheader("📋 Desglose de Tenencia")
-            columnas_finales = [
-                'Ticker Argy', 'Descripción', 'Cantidad', 'Ratio', 
-                'Acciones_EEUU', 'Ticker_EEUU', 'Precio_USD', 'Total_USD'
-            ]
-            st.dataframe(df[columnas_finales].style.format({
-                'Acciones_EEUU': '{:.4f}',
-                'Precio_USD': '${:.2f}',
-                'Total_USD': '${:.2f}'
+        with c2:
+            st.subheader("📋 Desglose de Activos")
+            cols_ver = ['Ticker Argy', 'Descripción', 'Cantidad', 'Ratio', 'Acciones_EEUU', 'Ticker_EEUU', 'Precio_USD', 'Total_USD']
+            st.dataframe(df[cols_ver].style.format({
+                'Acciones_EEUU': '{:.4f}', 'Precio_USD': '${:.2f}', 'Total_USD': '${:.2f}'
             }), use_container_width=True)
 
         st.divider()
-        fig_bar = px.bar(df, x='Ticker Argy', y='Total_USD', color='Ticker Argy',
-                         title="Valorización por Activo (USD)", text_auto='.2s')
-        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- 4. SECCIÓN INTERACTIVA: COMPARATIVA HISTÓRICA ---
+        st.subheader(f"📊 Rendimiento Histórico ({periodo})")
+        
+        with st.spinner('Calculando evolución comparativa...'):
+            # Lista de tickers: Mis activos + Benchmarks elegidos
+            tickers_bench = [benchmarks_dict[s] for s in seleccionados]
+            lista_full = list(set(tickers_eeuu + tickers_bench))
+            
+            historial = yf.download(lista_full, period=periodo)['Close'].ffill()
+
+            # Calcular valor diario de la cartera del usuario
+            valor_diario = 0
+            for _, row in df.iterrows():
+                t = row['Ticker_EEUU']
+                cant = row['Cantidad'] / row['Ratio']
+                valor_diario += historial[t] * cant
+            
+            # DataFrame para el gráfico (Base 100)
+            df_comp = pd.DataFrame(index=historial.index)
+            df_comp['Mi Cartera'] = (valor_diario / valor_diario.iloc[0]) * 100
+            
+            for s in seleccionados:
+                ticker_b = benchmarks_dict[s]
+                df_comp[s] = (historial[ticker_b] / historial[ticker_b].iloc[0]) * 100
+
+            # Gráfico interactivo
+            fig_hist = px.line(
+                df_comp, 
+                y=df_comp.columns,
+                labels={'value': 'Evolución (Base 100)', 'Date': 'Fecha'},
+                title="¿Quién ganó? (Evolución de $100 invertidos)"
+            )
+            fig_hist.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_hist, use_container_width=True)
 
     else:
-        st.info("Cargá datos en Airtable para visualizar el portafolio.")
+        st.info("Cargá datos en Airtable para ver el análisis.")
 
 except Exception as e:
-    st.error(f"Error técnico en el cálculo: {e}")
-    st.info("Revisá que los nombres de las columnas en Airtable coincidan exactamente con el código.")
+    st.error(f"Error técnico: {e}")
