@@ -74,7 +74,7 @@ try:
     st.divider()
     st.subheader("🏁 Activos Liquidados (Ganancias Realizadas)")
     
-    # Identificamos activos que pasaron por movimientos pero ya no están en cartera
+    # Identificamos activos que estuvieron en movimientos pero ya no están en el portafolio actual
     tickers_en_movs = set(df_movs['Ticker_EEUU'].unique())
     tickers_en_port = set(df_actual['Ticker_EEUU'].unique())
     liquidados = list(tickers_en_movs - tickers_en_port)
@@ -82,16 +82,18 @@ try:
     if liquidados:
         res_liq = []
         for t in liquidados:
-            # Filtramos todas las operaciones de este activo
-            m_t = df_movs[df_movs['Ticker_EEUU'] == t]
+            # Filtramos todos los movimientos de ese activo específico
+            m_t = df_movs[df_movs['Ticker_EEUU'] == t].copy()
             
-            # Calculamos montos totales
-            monto_compra = m_t[m_t['Operacion'].str.upper() == 'COMPRA']['Total Pesos'].sum()
-            monto_venta = m_t[m_t['Operacion'].str.upper() == 'VENTA']['Total Pesos'].sum()
+            # Limpieza de seguridad: pasamos a mayúsculas y quitamos espacios
+            m_t['Operacion'] = m_t['Operacion'].str.strip().str.upper()
             
-            # Cálculo de rendimiento nominal y porcentual
+            # Sumamos basándonos únicamente en la descripción de la columna 'Operacion'
+            # Usamos 'Importe' que es el nombre de tu columna en las capturas
+            monto_compra = m_t[m_t['Operacion'] == 'COMPRA']['Importe'].sum()
+            monto_venta = m_t[m_t['Operacion'] == 'VENTA']['Importe'].sum()
+            
             rendimiento = monto_venta - monto_compra
-            # Evitamos división por cero si solo hubiera ventas cargadas por error
             porcentaje = (rendimiento / monto_compra) * 100 if monto_compra > 0 else 0
             
             res_liq.append({
@@ -102,25 +104,17 @@ try:
                 '% Retorno': porcentaje
             })
         
-        # Creamos el DataFrame de liquidados
         df_liq = pd.DataFrame(res_liq)
         
-        # Aplicamos formato y colores
-        def color_rendimiento(val):
-            color = 'red' if val < 0 else 'green'
-            return f'color: {color}'
-
+        # Aplicamos el formato visual de tabla
         st.dataframe(
             df_liq.style.format({
                 'Monto de Compra': '${:,.2f}',
                 'Monto de Venta': '${:,.2f}',
                 'Rendimiento': '${:,.2f}',
                 '% Retorno': '{:.2f}%'
-            }).applymap(color_rendimiento, subset=['Rendimiento', '% Retorno']),
+            }).applymap(lambda x: 'color: red' if x < 0 else 'color: green', subset=['Rendimiento', '% Retorno']),
             use_container_width=True
         )
     else:
-        st.write("No tenés posiciones totalmente cerradas aún.")
-
-except Exception as e:
-    st.error(f"Error: {e}")
+        st.info("No se detectaron posiciones cerradas (activos que estén en movimientos pero no en el portafolio).")
