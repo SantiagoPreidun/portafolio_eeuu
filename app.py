@@ -70,31 +70,57 @@ try:
     else:
         st.info("💡 Hacé clic en una fila del portafolio para ver sus compras y ventas aquí.")
 
-    # --- SECCIÓN 3: ACTIVOS LIQUIDADOS ---
+# --- SECCIÓN 3: ACTIVOS LIQUIDADOS (POSICIONES CERRADAS) ---
     st.divider()
-    st.subheader("🏁 Activos Liquidados (Posiciones Cerradas)")
+    st.subheader("🏁 Activos Liquidados (Ganancias Realizadas)")
     
+    # Identificamos activos que pasaron por movimientos pero ya no están en cartera
     tickers_en_movs = set(df_movs['Ticker_EEUU'].unique())
     tickers_en_port = set(df_actual['Ticker_EEUU'].unique())
-    # Activos que vendiste todo y ya no están en el portafolio
     liquidados = list(tickers_en_movs - tickers_en_port)
 
     if liquidados:
         res_liq = []
         for t in liquidados:
+            # Filtramos todas las operaciones de este activo
             m_t = df_movs[df_movs['Ticker_EEUU'] == t]
-            compras = m_t[m_t['Operacion'].str.upper() == 'COMPRA']['Total Pesos'].sum()
-            ventas = m_t[m_t['Operacion'].str.upper() == 'VENTA']['Total Pesos'].sum()
+            
+            # Calculamos montos totales
+            monto_compra = m_t[m_t['Operacion'].str.upper() == 'COMPRA']['Total Pesos'].sum()
+            monto_venta = m_t[m_t['Operacion'].str.upper() == 'VENTA']['Total Pesos'].sum()
+            
+            # Cálculo de rendimiento nominal y porcentual
+            rendimiento = monto_venta - monto_compra
+            # Evitamos división por cero si solo hubiera ventas cargadas por error
+            porcentaje = (rendimiento / monto_compra) * 100 if monto_compra > 0 else 0
+            
             res_liq.append({
                 'Ticker': t,
-                'Inversión Total (ARS)': compras,
-                'Retorno Total (ARS)': ventas,
-                'P&L Final (ARS)': ventas - compras
+                'Monto de Compra': monto_compra,
+                'Monto de Venta': monto_venta,
+                'Rendimiento': rendimiento,
+                '% Retorno': porcentaje
             })
         
-        st.dataframe(pd.DataFrame(res_liq).style.format({'P&L Final (ARS)': '${:,.2f}'}), use_container_width=True)
+        # Creamos el DataFrame de liquidados
+        df_liq = pd.DataFrame(res_liq)
+        
+        # Aplicamos formato y colores
+        def color_rendimiento(val):
+            color = 'red' if val < 0 else 'green'
+            return f'color: {color}'
+
+        st.dataframe(
+            df_liq.style.format({
+                'Monto de Compra': '${:,.2f}',
+                'Monto de Venta': '${:,.2f}',
+                'Rendimiento': '${:,.2f}',
+                '% Retorno': '{:.2f}%'
+            }).applymap(color_rendimiento, subset=['Rendimiento', '% Retorno']),
+            use_container_width=True
+        )
     else:
-        st.write("No hay posiciones cerradas por el momento.")
+        st.write("No tenés posiciones totalmente cerradas aún.")
 
 except Exception as e:
     st.error(f"Error: {e}")
