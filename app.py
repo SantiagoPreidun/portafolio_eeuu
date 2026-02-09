@@ -59,14 +59,68 @@ try:
             fig_pie = px.pie(df_actual, values='Valuación USD', names='Ticker_EEUU', hole=0.4, title="Distribución por Activo")
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        # --- SECCIÓN 2: DETALLE DE OPERACIONES (DRILL-DOWN) ---
+# --- SECCIÓN 2: DETALLE DE OPERACIONES (DRILL-DOWN) 100% EN USD ---
         if len(sel_port.selection.rows) > 0:
             idx = sel_port.selection.rows[0]
-            t_sel = df_actual.iloc[idx]['Ticker_EEUU']
+            fila_sel = df_actual.iloc[idx]
+            t_sel = fila_sel['Ticker_EEUU']
+            p_hoy_sel = fila_sel['Precio Hoy']
+            
             st.divider()
-            st.subheader(f"🔍 Historial Detallado: {t_sel}")
-            m_t = df_movs[df_movs['Ticker_EEUU'] == t_sel].sort_values('Fecha', ascending=False)
-            st.table(m_t[['Fecha', 'Operacion', 'Cantidad', col_dinero]])
+            st.subheader(f"🔍 Análisis de Rendimiento USD: {t_sel}")
+            
+            # Filtramos movimientos del activo seleccionado
+            m_t = df_movs[df_movs['Ticker_EEUU'] == t_sel].copy()
+            m_t['Fecha'] = pd.to_datetime(m_t['Fecha'])
+            m_t['Operacion'] = m_t['Operacion'].str.strip().str.upper()
+
+            with st.spinner(f'Calculando rentabilidad en dólares de {t_sel}...'):
+                # Obtenemos historial de precios para determinar el costo en USD de cada fecha
+                t_api = fix_ticker_api(t_sel)
+                h_precios = yf.download(t_api, start=m_t['Fecha'].min(), progress=False)['Close']
+                
+                detalles_op = []
+                for _, op in m_t.iterrows():
+                    # Buscamos el precio de la acción en la fecha de la operación
+                    try:
+                        # Buscamos el cierre de ese día o el anterior más cercano
+                        p_compra_usd = h_precios.loc[:op['Fecha']].iloc[-1]
+                        if isinstance(p_compra_usd, pd.Series): p_compra_usd = p_compra_usd.iloc[0]
+                    except:
+                        p_compra_usd = p_hoy_sel
+
+                    # 1. Monto de la operación en USD 
+                    # (Calculado sobre el precio del activo en esa fecha)
+                    cantidad_op = op['Cantidad'] / op['Ratio']
+                    monto_total_usd = cantidad_op * p_compra_usd
+                    
+                    # 2. Rendimiento vs Precio Actual
+                    rend_op = (p_hoy_sel / p_compra_usd) - 1 if p_compra_usd > 0 else 0
+
+                    detalles_op.append({
+                        'Fecha': op['Fecha'].strftime('%d/%m/%Y'),
+                        'Operación': op['Operacion'],
+                        'Acciones (EUA)': cantidad_op,
+                        'Precio Compra (USD)': p_compra_usd,
+                        'Monto Operación (USD)': monto_total_usd,
+                        'Rendimiento (%)': rend_op * 100
+                    })
+
+                df_detalle_op = pd.DataFrame(detalles_op)
+
+                # Tabla de análisis 100% Dólar
+                st.dataframe(
+                    df_detalle_op.style.format({
+                        'Acciones (EUA)': '{:.4f}',
+                        'Precio Compra (USD)': '${:,.2f}',
+                        'Monto Operación (USD)': '${:,.2f}',
+                        'Rendimiento (%)': '{:.2f}%'
+                    }).applymap(lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else 'color: green', 
+                              subset=['Rendimiento (%)']),
+                    use_container_width=True
+                )
+                
+                st.caption(f"Precios basados en el cierre diario de Yahoo Finance para {t_sel}.")
 
     # --- SECCIÓN 3: EVOLUCIÓN HISTÓRICA ---
     st.divider()
