@@ -48,9 +48,9 @@ try:
     # Identificación de columna de dinero (Importe es el prioritario)
     col_dinero = next((c for c in df_movs.columns if c in ['Importe', 'Total Pesos', 'Monto']), 'Importe')
 
-    # --- SECCIÓN 1: COMPOSICIÓN DE CARTERA ---
+    # --- SECCIÓN 1: TENENCIA ACTUAL (CON COLUMNA DE RENDIMIENTO REAL) ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("💼 Composición de Cartera Actual")
+    st.markdown('<div class="section-title">💼 Mi Portafolio Real (Tenencia Actual)</div>', unsafe_allow_html=True)
     
     if not df_actual.empty:
         tickers_api = [fix_ticker(t) for t in df_actual['Ticker_EEUU'].unique()]
@@ -64,17 +64,48 @@ try:
         df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].map(precios_dict)
         df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
         
+        # --- NUEVO CÁLCULO: RETORNO DE POSICIÓN ---
+        rendimientos_cartera = []
+        for _, row in df_actual.iterrows():
+            t = row['Ticker_EEUU']
+            # Filtramos compras para este ticker en la tabla de movimientos
+            m_t = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Operacion'].str.strip().str.upper() == 'COMPRA')]
+            
+            # Calculamos costo histórico total en USD (Dolarizado por precio de fecha de operación)
+            # Esto nos da el retorno real del activo vs su valuación actual
+            costo_total_usd = 0
+            for _, op in m_t.iterrows():
+                try:
+                    # Buscamos el precio histórico para determinar cuántos USD representó esa compra
+                    h_p = yf.download(fix_ticker(t), start=op['Fecha'], end=pd.to_datetime(op['Fecha']) + datetime.timedelta(days=3), progress=False)['Close']
+                    precio_c = h_p.iloc[0] if not h_p.empty else row['Precio Hoy']
+                    costo_total_usd += (op['Cantidad'] / op['Ratio']) * precio_c
+                except:
+                    costo_total_usd += 0
+            
+            rend_abs = row['Valuación USD'] - costo_total_usd
+            rend_perc = (rend_abs / costo_total_usd * 100) if costo_total_usd > 0 else 0
+            rendimientos_cartera.append(rend_perc)
+
+        df_actual['Retorno (%)'] = rendimientos_cartera
+
         c1, c2 = st.columns([2, 1])
         with c1:
-            st.markdown(f"Patrimonio Total: <span class='metric-text'>USD {df_actual['Valuación USD'].sum():,.2f}</span>", unsafe_allow_html=True)
-            # Tabla principal sin gradientes para evitar errores de matplotlib
+            st.metric("Patrimonio Total Actual", f"USD {df_actual['Valuación USD'].sum():,.2f}")
+            
+            # Visualización con colores para el retorno
             sel_port = st.dataframe(
-                df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy']],
+                df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy', 'Retorno (%)']].style.format({
+                    'Valuación USD': '${:,.2f}', 
+                    'Precio Hoy': '${:,.2f}',
+                    'Retorno (%)': '{:.2f}%'
+                }).applymap(lambda x: 'color: #ff4b4b' if isinstance(x, (int, float)) and x < 0 else 'color: #00cc96', subset=['Retorno (%)']),
                 use_container_width=True, on_select="rerun", selection_mode="single-row"
             )
+        
         with c2:
-            fig_pie = px.pie(df_actual, values='Valuación USD', names='Ticker_EEUU', hole=0.4, template="plotly_dark")
-            fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+            fig_pie = px.pie(df_actual, values='Valuación USD', names='Ticker_EEUU', hole=0.5, template="plotly_dark")
+            fig_pie.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
