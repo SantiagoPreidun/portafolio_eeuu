@@ -18,11 +18,6 @@ st.markdown("""
         margin-bottom: 20px;
     }
     .metric-text { color: #00cc96; font-weight: bold; font-size: 24px; }
-    .section-title {
-        color: #f0f6fc;
-        font-size: 20px; font-weight: bold; margin-bottom: 15px;
-        border-left: 5px solid #00cc96; padding-left: 15px;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -32,14 +27,15 @@ try:
     table_movs = Table(AIRTABLE_KEY, BASE_ID, "Movimientos")
     table_port = Table(AIRTABLE_KEY, BASE_ID, "Portafolio")
 except:
-    st.error("Error en credenciales de Airtable.")
+    st.error("Error en credenciales. Verificá los Secrets en Streamlit.")
     st.stop()
 
 def fix_ticker(t):
     return str(t).strip().replace('.', '-')
 
-# --- 2. EJECUCIÓN ---
+# --- 2. EJECUCIÓN PRINCIPAL ---
 try:
+    # Carga inicial de datos
     df_actual = pd.DataFrame([r['fields'] for r in table_port.all()])
     df_movs = pd.DataFrame([r['fields'] for r in table_movs.all()])
     df_actual.columns = [c.strip() for c in df_actual.columns]
@@ -47,14 +43,14 @@ try:
     
     col_dinero = next((c for c in df_movs.columns if c in ['Importe', 'Total Pesos', 'Monto']), 'Importe')
 
-    # --- SECCIÓN 1: CARTERA ---
+    # --- SECCIÓN 1: TENENCIA ACTUAL (CÁLCULO USD) ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">💼 Mi Portafolio (Rendimiento USD)</div>', unsafe_allow_html=True)
+    st.subheader("💼 Mi Portafolio (Rendimiento Puro USD)")
     
     if not df_actual.empty:
         tickers_api = [fix_ticker(t) for t in df_actual['Ticker_EEUU'].unique()]
         
-        with st.spinner('Actualizando precios y calculando ganancias...'):
+        with st.spinner('Sincronizando con Wall Street...'):
             data_now = yf.download(tickers_api, period="1d", progress=False)['Close']
             if len(tickers_api) > 1:
                 precios_dict = {k.replace('-', '.'): v for k, v in data_now.iloc[-1].to_dict().items()}
@@ -64,42 +60,38 @@ try:
             df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].map(precios_dict)
             df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
             
-            ganancias_nominales = []
-            rets_posicion = []
-            
+            ganancias_usd, retornos_perc = [], []
+
             for _, row in df_actual.iterrows():
                 t = row['Ticker_EEUU']
                 m_t = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Operacion'].str.upper() == 'COMPRA')]
                 
-                costo_acum_usd = 0
                 if not m_t.empty:
                     h_p = yf.download(fix_ticker(t), start=m_t['Fecha'].min(), progress=False)['Close']
+                    costo_total_usd = 0
                     for _, op in m_t.iterrows():
                         try:
                             p_c_usd = h_p.loc[:op['Fecha']].ffill().iloc[-1]
                             if isinstance(p_c_usd, pd.Series): p_c_usd = p_c_usd.iloc[0]
-                            costo_acum_usd += (op['Cantidad'] / op['Ratio']) * p_c_usd
+                            costo_total_usd += (op['Cantidad'] / op['Ratio']) * p_c_usd
                         except: continue
-                    
-                    # AQUÍ ESTABA EL ERROR: Cambiado costo_total_usd por costo_acum_usd
-                    ganancia_usd = row['Valuación USD'] - costo_acum_usd
-                    ret_perc = (ganancia_usd / costo_acum_usd * 100) if costo_acum_usd > 0 else 0
+                    ganancia = row['Valuación USD'] - costo_total_usd
+                    retorno = (ganancia / costo_total_usd * 100) if costo_total_usd > 0 else 0
                 else:
-                    ganancia_usd, ret_perc = 0, 0
+                    ganancia, retorno = 0, 0
                 
-                ganancias_nominales.append(ganancia_usd)
-                rets_posicion.append(ret_perc)
+                ganancias_usd.append(ganancia)
+                retornos_perc.append(retorno)
             
-            df_actual['Ganancia (USD)'] = ganancias_nominales
-            df_actual['Retorno (%)'] = rets_posicion
+            df_actual['Ganancia (USD)'] = ganancias_usd
+            df_actual['Retorno (%)'] = retornos_perc
 
         c1, c2 = st.columns([2, 1])
         with c1:
             st.markdown(f"Patrimonio Total: <span class='metric-text'>USD {df_actual['Valuación USD'].sum():,.2f}</span>", unsafe_allow_html=True)
             sel_port = st.dataframe(
                 df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy', 'Ganancia (USD)', 'Retorno (%)']].style.format({
-                    'Valuación USD': '${:,.2f}', 'Precio Hoy': '${:,.2f}', 
-                    'Ganancia (USD)': '${:,.2f}', 'Retorno (%)': '{:.2f}%'
+                    'Valuación USD': '${:,.2f}', 'Precio Hoy': '${:,.2f}', 'Ganancia (USD)': '${:,.2f}', 'Retorno (%)': '{:.2f}%'
                 }).applymap(lambda x: 'color: #ff4b4b' if isinstance(x, (float, int)) and x < 0 else 'color: #00cc96', subset=['Ganancia (USD)', 'Retorno (%)']),
                 use_container_width=True, on_select="rerun", selection_mode="single-row"
             )
@@ -114,68 +106,63 @@ try:
         t_sel = row_sel['Ticker_EEUU']
         
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.markdown(f'<div class="section-title">🔍 Historial de Operaciones: {t_sel}</div>', unsafe_allow_html=True)
-        
+        st.subheader(f"🔍 Historial Detallado USD: {t_sel}")
         m_t_det = df_movs[df_movs['Ticker_EEUU'] == t_sel].copy()
         m_t_det['Fecha'] = pd.to_datetime(m_t_det['Fecha'])
         h_prices_det = yf.download(fix_ticker(t_sel), start=m_t_det['Fecha'].min(), progress=False)['Close']
         
-        det_list = []
+        detalles = []
         for _, op in m_t_det.iterrows():
             try:
                 p_c = h_prices_det.loc[:op['Fecha']].ffill().iloc[-1]
                 if isinstance(p_c, pd.Series): p_c = p_c.iloc[0]
                 c_usa = op['Cantidad'] / op['Ratio']
-                det_list.append({
+                detalles.append({
                     'Fecha': op['Fecha'].strftime('%d/%m/%Y'),
                     'Operación': op['Operacion'].upper(),
                     'Acciones (USA)': c_usa,
-                    'Precio Compra (USD)': p_c,
+                    'Precio Compra (USD)': float(p_c),
                     'Ganancia Lote (USD)': (c_usa * row_sel['Precio Hoy']) - (c_usa * p_c),
                     'Retorno Lote (%)': ((row_sel['Precio Hoy'] / p_c) - 1) * 100
                 })
             except: continue
         
-        st.dataframe(pd.DataFrame(det_list).style.format({
-            'Acciones (USA)': '{:.4f}', 'Precio Compra (USD)': '${:,.2f}', 
-            'Ganancia Lote (USD)': '${:,.2f}', 'Retorno Lote (%)': '{:.2f}%'
-        }).applymap(lambda x: 'color: #ff4b4b' if isinstance(x, (float, int)) and x < 0 else 'color: #00cc96', subset=['Ganancia Lote (USD)', 'Retorno Lote (%)']), 
-        use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(detalles).style.format({
+            'Acciones (USA)': '{:.4f}', 'Precio Compra (USD)': '${:,.2f}', 'Ganancia Lote (USD)': '${:,.2f}', 'Retorno Lote (%)': '{:.2f}%'
+        }).applymap(lambda x: 'color: #ff4b4b' if isinstance(x, (float, int)) and x < 0 else 'color: #00cc96', subset=['Ganancia Lote (USD)', 'Retorno Lote (%)']), use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- SECCIÓN 3: EVOLUCIÓN ---
+    # --- SECCIÓN 3: EVOLUCIÓN HISTÓRICA ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">📈 Evolución Histórica</div>', unsafe_allow_html=True)
-    
+    st.subheader("📈 Evolución Global del Patrimonio")
     @st.cache_data(ttl=3600)
-    def calc_ev_pro(_m, _p, _t):
+    def calc_ev_final(_m, _p, _tapi):
         f_i = pd.to_datetime(_m['Fecha']).min()
-        hp = yf.download(_t, start=f_i, progress=False)['Close']
-        if isinstance(hp, pd.Series): hp = hp.to_frame(); hp.columns = _t
+        hp = yf.download(_tapi, start=f_i, progress=False)['Close']
+        if isinstance(hp, pd.Series): hp = hp.to_frame(); hp.columns = _tapi
         hp.columns = [c.replace('-', '.') for c in hp.columns]
         r = pd.date_range(start=f_i, end=datetime.datetime.now())
         ev = []
         for d in r:
-            s_d = 0
+            s = 0
             for _, a in _p.iterrows():
                 tk = a['Ticker_EEUU']
                 m_h = _m[(_m['Ticker_EEUU'] == tk) & (pd.to_datetime(_m['Fecha']) <= d)]
                 q = (m_h[m_h['Operacion'].str.upper()=='COMPRA']['Cantidad'].sum() - m_h[m_h['Operacion'].str.upper()=='VENTA']['Cantidad'].sum()) / a['Ratio']
                 if tk in hp.columns:
-                    p_v = hp.loc[:d, tk].ffill()
-                    s_d += q * p_v.iloc[-1] if not p_v.empty else 0
-            ev.append(s_d)
+                    p_val = hp.loc[:d, tk].ffill()
+                    s += q * p_val.iloc[-1] if not p_val.empty else 0
+            ev.append(s)
         return pd.DataFrame({'USD': ev}, index=r)
 
-    df_ev = calc_ev_pro(df_movs, df_actual, tickers_api)
+    df_ev = calc_ev_final(df_movs, df_actual, tickers_api)
     df_ev.iloc[-1] = df_actual['Valuación USD'].sum()
     st.plotly_chart(px.area(df_ev, y='USD', template="plotly_dark", color_discrete_sequence=['#00cc96']), use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- SECCIÓN 4: LIQUIDADOS ---
+    # --- SECCIÓN 4: ACTIVOS LIQUIDADOS ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">🏁 Activos Liquidados (USD)</div>', unsafe_allow_html=True)
-    
+    st.subheader("🏁 Ganancias Realizadas (Liquidados)")
     t_liq = list(set(df_movs['Ticker_EEUU'].unique()) - set(df_actual['Ticker_EEUU'].unique()))
     if t_liq:
         res_l = []
@@ -191,12 +178,13 @@ try:
                     if op['Operacion'].upper() == 'COMPRA': c_u += m
                     else: v_u += m
                 except: continue
-            res_l.append({'Ticker': t, 'Monto Compra': float(c_u), 'Monto Venta': float(v_u), 'Rendimiento': float(v_u-c_u), '%': float(((v_u/c_u)-1)*100 if c_u>0 else 0)})
+            res_l.append({'Ticker': t, 'Monto Compra (USD)': float(c_u), 'Monto Venta (USD)': float(v_u), 'Rendimiento': float(v_u-c_u), '%': float(((v_u/c_u)-1)*100 if c_u>0 else 0)})
         df_l = pd.DataFrame(res_l)
-        df_tot = pd.DataFrame([{'Ticker': 'TOTAL GLOBAL', 'Monto Compra': df_l['Monto Compra'].sum(), 'Monto Venta': df_l['Monto Venta'].sum(), 'Rendimiento': df_l['Rendimiento'].sum(), '%': (df_l['Rendimiento'].sum()/df_l['Monto Compra'].sum()*100) if df_l['Monto Compra'].sum()>0 else 0}])
-        st.dataframe(pd.concat([df_l, df_tot], ignore_index=True).style.format({'Monto Compra': '${:,.2f}', 'Monto Venta': '${:,.2f}', 'Rendimiento': '${:,.2f}', '%': '{:.2f}%'})
+        # FILA DE TOTALES
+        df_tot = pd.DataFrame([{'Ticker': 'TOTAL GLOBAL', 'Monto Compra (USD)': df_l['Monto Compra (USD)'].sum(), 'Monto Venta (USD)': df_l['Monto Venta (USD)'].sum(), 'Rendimiento': df_l['Rendimiento'].sum(), '%': (df_l['Rendimiento'].sum()/df_l['Monto Compra (USD)'].sum()*100) if df_l['Monto Compra (USD)'].sum()>0 else 0}])
+        st.dataframe(pd.concat([df_l, df_tot], ignore_index=True).style.format({'Monto Compra (USD)': '${:,.2f}', 'Monto Venta (USD)': '${:,.2f}', 'Rendimiento': '${:,.2f}', '%': '{:.2f}%'})
                      .apply(lambda x: ['font-weight: bold; background-color: #333' if x['Ticker'] == 'TOTAL GLOBAL' else '' for _ in x], axis=1), use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 except Exception as e:
-    st.error(f"Error: {e}")
+    st.error(f"Error detectado: {e}")
