@@ -16,65 +16,69 @@ except Exception as e:
     st.error("Error en Secrets. Verificá tus credenciales.")
     st.stop()
 
-# --- 2. CARGA DE DATOS ---
+# --- 2. CARGA Y LIMPIEZA DE DATOS ---
 try:
     # Traemos datos de Airtable
     df_actual = pd.DataFrame([r['fields'] for r in table_port.all()])
     df_movs = pd.DataFrame([r['fields'] for r in table_movs.all()])
     
-    # Limpieza de nombres de columnas (trim de espacios)
+    # Limpieza de nombres de columnas
     df_actual.columns = [c.strip() for c in df_actual.columns]
     df_movs.columns = [c.strip() for c in df_movs.columns]
 
-    # --- FIX DE TICKERS (BRK.B -> BRK-B) ---
+    # Función para que Yahoo Finance entienda tickers con puntos (BRK.B -> BRK-B)
     def limpiar_ticker(t):
         return str(t).strip().replace('.', '-')
 
     tickers_port = df_actual['Ticker_EEUU'].unique().tolist()
-    # Limpiamos los tickers para la API de Yahoo
     tickers_api = [limpiar_ticker(t) for t in tickers_port]
     
-    with st.spinner('Consultando Wall Street...'):
-        data_now = yf.download(tickers_api, period="1d", progress=False)['Close']
-        
-        # Mapeo de precios (manejo de ticker único o múltiple)
-        if len(tickers_api) > 1:
-            precios_dict = data_now.iloc[-1].to_dict()
+    with st.spinner('Consultando precios en tiempo real...'):
+        if tickers_api:
+            data_now = yf.download(tickers_api, period="1d", progress=False)['Close']
+            
+            # Mapeo de precios actuales
+            if len(tickers_api) > 1:
+                precios_dict = data_now.iloc[-1].to_dict()
+            else:
+                precios_dict = {tickers_api[0]: float(data_now.iloc[-1])}
         else:
-            precios_dict = {tickers_api[0]: float(data_now.iloc[-1])}
+            precios_dict = {}
 
     # --- SECCIÓN 1: COMPOSICIÓN ACTUAL ---
     st.title("📊 Composición de mi Portafolio")
     
-    # Mapeamos el precio usando el ticker limpio
-    df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].apply(lambda x: precios_dict.get(limpiar_ticker(x)))
-    df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
-    
-    st.metric("Patrimonio Total Actual", f"USD {df_actual['Valuación USD'].sum():,.2f}")
+    if not df_actual.empty:
+        df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].apply(lambda x: precios_dict.get(limpiar_ticker(x)))
+        df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
+        
+        st.metric("Patrimonio Total Actual", f"USD {df_actual['Valuación USD'].sum():,.2f}")
 
-    # Tabla interactiva (Solo lo que tenés hoy)
-    sel_port = st.dataframe(
-        df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy']],
-        use_container_width=True, on_select="rerun", selection_mode="single-row"
-    )
+        # Tabla interactiva
+        sel_port = st.dataframe(
+            df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy']],
+            use_container_width=True, on_select="rerun", selection_mode="single-row"
+        )
+    else:
+        st.warning("La tabla Portafolio está vacía.")
+        sel_port = None
 
     # --- SECCIÓN 2: DETALLE INTERACTIVO ---
     st.divider()
-    if len(sel_port.selection.rows) > 0:
+    if sel_port and len(sel_port.selection.rows) > 0:
         idx = sel_port.selection.rows[0]
         t_sel = df_actual.iloc[idx]['Ticker_EEUU']
         st.subheader(f"📑 Historial de Movimientos: {t_sel}")
         
         hist_filt = df_movs[df_movs['Ticker_EEUU'] == t_sel].sort_values('Fecha', ascending=False)
-        st.table(hist_filt[['Fecha', 'Operacion', 'Cantidad', 'Ratio', 'Total Pesos']])
+        st.table(hist_filt[['Fecha', 'Operacion', 'Cantidad', 'Ratio', 'Importe']])
     else:
-        st.info("💡 Hacé clic en una fila del portafolio para ver sus compras y ventas aquí.")
+        st.info("💡 Hacé clic en una fila de la tabla superior para ver el detalle de sus operaciones.")
 
-# --- SECCIÓN 3: ACTIVOS LIQUIDADOS (POSICIONES CERRADAS) ---
+    # --- SECCIÓN 3: ACTIVOS LIQUIDADOS (SOLO POR DESCRIPCIÓN) ---
     st.divider()
     st.subheader("🏁 Activos Liquidados (Ganancias Realizadas)")
     
-    # Identificamos activos que estuvieron en movimientos pero ya no están en el portafolio actual
     tickers_en_movs = set(df_movs['Ticker_EEUU'].unique())
     tickers_en_port = set(df_actual['Ticker_EEUU'].unique())
     liquidados = list(tickers_en_movs - tickers_en_port)
@@ -82,14 +86,12 @@ try:
     if liquidados:
         res_liq = []
         for t in liquidados:
-            # Filtramos todos los movimientos de ese activo específico
             m_t = df_movs[df_movs['Ticker_EEUU'] == t].copy()
             
-            # Limpieza de seguridad: pasamos a mayúsculas y quitamos espacios
+            # Normalizamos la columna Operacion
             m_t['Operacion'] = m_t['Operacion'].str.strip().str.upper()
             
-            # Sumamos basándonos únicamente en la descripción de la columna 'Operacion'
-            # Usamos 'Importe' que es el nombre de tu columna en las capturas
+            # Sumamos basándonos exclusivamente en el texto de la columna Operacion
             monto_compra = m_t[m_t['Operacion'] == 'COMPRA']['Importe'].sum()
             monto_venta = m_t[m_t['Operacion'] == 'VENTA']['Importe'].sum()
             
@@ -106,7 +108,7 @@ try:
         
         df_liq = pd.DataFrame(res_liq)
         
-        # Aplicamos el formato visual de tabla
+        # Formato de tabla con colores
         st.dataframe(
             df_liq.style.format({
                 'Monto de Compra': '${:,.2f}',
@@ -117,4 +119,7 @@ try:
             use_container_width=True
         )
     else:
-        st.info("No se detectaron posiciones cerradas (activos que estén en movimientos pero no en el portafolio).")
+        st.write("No hay posiciones cerradas detectadas.")
+
+except Exception as e:
+    st.error(f"Error general: {e}")
