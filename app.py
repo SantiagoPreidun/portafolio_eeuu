@@ -2,120 +2,114 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from pyairtable import Table
-import plotly.express as px
+import datetime
 
 # --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="Valuador Portafolio USD", layout="wide")
+st.set_page_config(page_title="Gestión de Portafolio USD", layout="wide")
 
 try:
     AIRTABLE_KEY = st.secrets["AIRTABLE_API_KEY"]
     BASE_ID = st.secrets["BASE_ID"]
-    TABLE_NAME = st.secrets["TABLE_NAME"]
-    table = Table(AIRTABLE_KEY, BASE_ID, TABLE_NAME)
+    # Conectamos ambas tablas
+    table_movs = Table(AIRTABLE_KEY, BASE_ID, "Movimientos")
+    table_port = Table(AIRTABLE_KEY, BASE_ID, "Portafolio")
 except Exception as e:
-    st.error(f"⚠️ Error en Secrets: {e}")
+    st.error(f"Error de conexión con Airtable: {e}")
     st.stop()
 
-# --- 2. BARRA LATERAL (CONTROLES INTERACTIVOS) ---
-st.sidebar.title("⚙️ Panel de Control")
-st.sidebar.markdown("Configurá la comparativa histórica")
+# --- 2. LÓGICA DE PROCESAMIENTO HISTÓRICO ---
+@st.cache_data(ttl=3600)
+def procesar_historial(records):
+    df = pd.DataFrame([r['fields'] for r in records])
+    resultados = []
+    
+    for ticker, grupo in df.groupby('Ticker_EEUU'):
+        total_acciones = 0
+        total_invertido_usd = 0
+        total_invertido_pesos = 0
+        
+        for _, fila in grupo.iterrows():
+            # Datos de la operación
+            fecha = fila['Fecha']
+            acciones_op = fila['Cantidad'] / fila['Ratio']
+            pesos_op = fila['Total Pesos']
+            
+            # Buscar precio USD histórico (Yahoo Finance)
+            start = datetime.datetime.strptime(fecha, "%Y-%m-%d")
+            end = start + datetime.timedelta(days=4)
+            hist = yf.download(ticker, start=start.strftime("%Y-%m-%d"), 
+                               end=end.strftime("%Y-%m-%d"), progress=False)
+            
+            if not hist.empty:
+                precio_usd_hist = hist['Close'].iloc[0]
+                costo_usd_op = acciones_op * precio_usd_hist
+                
+                # Cálculo de CCL de esa operación
+                ccl_op = pesos_op / costo_usd_op if costo_usd_op > 0 else 0
+                
+                if fila['Operación'] == 'Compra':
+                    total_acciones += acciones_op
+                    total_invertido_usd += costo_usd_op
+                    total_invertido_pesos += pesos_op
+                else: # Venta
+                    total_acciones -= acciones_op
+                    # (Aquí se podría sofisticar más restando proporcionalmente)
 
-periodo = st.sidebar.selectbox(
-    "Seleccioná el periodo:", 
-    ["1mo", "3mo", "6mo", "1y", "2y", "5y"], 
-    index=2
-)
+        ppp_usd = total_invertido_usd / total_acciones if total_acciones > 0 else 0
+        ccl_promedio = total_invertido_pesos / total_invertido_usd if total_invertido_usd > 0 else 0
+        
+        resultados.append({
+            'Ticker': ticker,
+            'Acciones_EEUU': total_acciones,
+            'PPP_USD': ppp_usd,
+            'Inversión_Total_USD': total_invertido_usd,
+            'CCL_Promedio_Compra': ccl_promedio
+        })
+    return pd.DataFrame(resultados)
 
-benchmarks_dict = {
-    "S&P 500 (SPY)": "SPY",
-    "Nasdaq 100 (QQQ)": "QQQ",
-    "Oro (GLD)": "GLD"
-}
-
-seleccionados = st.sidebar.multiselect(
-    "Comparar mi cartera contra:", 
-    options=list(benchmarks_dict.keys()),
-    default=["S&P 500 (SPY)"]
-)
-
-# --- 3. PROCESAMIENTO DE DATOS ACTUALES ---
-st.title("📈 Mi Portafolio: Nexo CEDEAR -> Wall Street")
+# --- 3. INTERFAZ Y DASHBOARD ---
+st.title("💼 Dashboard de Inversiones: Realidad USD")
 
 try:
-    records = table.all()
-    if records:
-        df = pd.DataFrame([r['fields'] for r in records])
-        
-        # Descarga de precios actuales
-        tickers_eeuu = df['Ticker_EEUU'].unique().tolist()
-        with st.spinner('Consultando Wall Street...'):
-            data_now = yf.download(tickers_eeuu, period="1d", auto_adjust=True)
-            if len(tickers_eeuu) > 1:
-                precios_hoy = data_now['Close'].iloc[-1].to_dict()
+    records_movs = table_movs.all()
+    if records_movs:
+        with st.spinner('Analizando movimientos históricos y consultando precios...'):
+            df_analisis = procesar_historial(records_movs)
+            
+            # Precios de HOY
+            tickers = df_analisis['Ticker'].tolist()
+            precios_hoy = yf.download(tickers, period="1d")['Close'].iloc[-1]
+            
+            if len(tickers) == 1:
+                df_analisis['Precio_Actual'] = precios_hoy
             else:
-                precios_hoy = {tickers_eeuu[0]: float(data_now['Close'].iloc[-1])}
+                df_analisis['Precio_Actual'] = df_analisis['Ticker'].map(precios_hoy)
 
-        # Cálculos del Nexo
-        df['Acciones_EEUU'] = df['Cantidad'] / df['Ratio']
-        df['Precio_USD'] = df['Ticker_EEUU'].map(precios_hoy)
-        df['Total_USD'] = df['Acciones_EEUU'] * df['Precio_USD']
-        
-        # Dashboard Principal
-        total_cartera = df['Total_USD'].sum()
-        c1, c2 = st.columns([1, 2])
-        
-        with c1:
-            st.metric("Patrimonio Total", f"USD {total_cartera:,.2f}")
-            fig_pie = px.pie(df, values='Total_USD', names='Ticker Argy', 
-                             hole=0.4, title="Distribución de Capital")
-            st.plotly_chart(fig_pie, use_container_width=True)
+        # CÁLCULOS DE PERFORMANCE
+        df_analisis['Valuación_Actual_USD'] = df_analisis['Acciones_EEUU'] * df_analisis['Precio_Actual']
+        df_analisis['Ganancia_USD'] = df_analisis['Valuación_Actual_USD'] - df_analisis['Inversión_Total_USD']
+        df_analisis['Rendimiento_%'] = (df_analisis['Ganancia_USD'] / df_analisis['Inversión_Total_USD']) * 100
 
-        with c2:
-            st.subheader("📋 Desglose de Activos")
-            cols_ver = ['Ticker Argy', 'Descripción', 'Cantidad', 'Ratio', 'Acciones_EEUU', 'Ticker_EEUU', 'Precio_USD', 'Total_USD']
-            st.dataframe(df[cols_ver].style.format({
-                'Acciones_EEUU': '{:.4f}', 'Precio_USD': '${:.2f}', 'Total_USD': '${:.2f}'
-            }), use_container_width=True)
+        # MÉTRICAS PRINCIPALES
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Patrimonio Total USD", f"${df_analisis['Valuación_Actual_USD'].sum():,.2f}")
+        m2.metric("Ganancia Total USD", f"${df_analisis['Ganancia_USD'].sum():,.2f}", 
+                  f"{ (df_analisis['Ganancia_USD'].sum() / df_analisis['Inversión_Total_USD'].sum())*100 :.2f}%")
+        m3.metric("CCL Promedio Cartera", f"${df_analisis['CCL_Promedio_Compra'].mean():,.2f}")
 
-        st.divider()
-
-        # --- 4. SECCIÓN INTERACTIVA: COMPARATIVA HISTÓRICA ---
-        st.subheader(f"📊 Rendimiento Histórico ({periodo})")
-        
-        with st.spinner('Calculando evolución comparativa...'):
-            # Lista de tickers: Mis activos + Benchmarks elegidos
-            tickers_bench = [benchmarks_dict[s] for s in seleccionados]
-            lista_full = list(set(tickers_eeuu + tickers_bench))
-            
-            historial = yf.download(lista_full, period=periodo)['Close'].ffill()
-
-            # Calcular valor diario de la cartera del usuario
-            valor_diario = 0
-            for _, row in df.iterrows():
-                t = row['Ticker_EEUU']
-                cant = row['Cantidad'] / row['Ratio']
-                valor_diario += historial[t] * cant
-            
-            # DataFrame para el gráfico (Base 100)
-            df_comp = pd.DataFrame(index=historial.index)
-            df_comp['Mi Cartera'] = (valor_diario / valor_diario.iloc[0]) * 100
-            
-            for s in seleccionados:
-                ticker_b = benchmarks_dict[s]
-                df_comp[s] = (historial[ticker_b] / historial[ticker_b].iloc[0]) * 100
-
-            # Gráfico interactivo
-            fig_hist = px.line(
-                df_comp, 
-                y=df_comp.columns,
-                labels={'value': 'Evolución (Base 100)', 'Date': 'Fecha'},
-                title="¿Quién ganó? (Evolución de $100 invertidos)"
-            )
-            fig_hist.update_layout(hovermode="x unified")
-            st.plotly_chart(fig_hist, use_container_width=True)
+        # TABLA DE DETALLE PROFESIONAL
+        st.subheader("📋 Análisis Detallado por Activo")
+        st.dataframe(df_analisis.style.format({
+            'PPP_USD': '{:.2f}',
+            'Precio_Actual': '{:.2f}',
+            'Valuación_Actual_USD': '{:.2f}',
+            'Ganancia_USD': '{:.2f}',
+            'Rendimiento_%': '{:.2f}%',
+            'CCL_Promedio_Compra': '{:.2f}'
+        }), use_container_width=True)
 
     else:
-        st.info("Cargá datos en Airtable para ver el análisis.")
+        st.info("No se encontraron movimientos. Cargá tus compras en Airtable.")
 
 except Exception as e:
-    st.error(f"Error técnico: {e}")
+    st.error(f"Error procesando el dashboard: {e}")
