@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from pyairtable import Table
+import plotly.express as px
 import datetime
 
 # --- 1. CONFIGURACIÓN ---
@@ -13,113 +14,119 @@ try:
     table_movs = Table(AIRTABLE_KEY, BASE_ID, "Movimientos")
     table_port = Table(AIRTABLE_KEY, BASE_ID, "Portafolio")
 except Exception as e:
-    st.error("Error en Secrets. Verificá tus credenciales.")
+    st.error("Error en credenciales. Verificá los Secrets.")
     st.stop()
 
-# --- 2. CARGA Y LIMPIEZA DE DATOS ---
+# --- 2. BARRA LATERAL (CONTROLES) ---
+st.sidebar.title("⚙️ Parámetros")
+ccl_val = st.sidebar.number_input("Cotización Dólar CCL ($)", value=1300.0, step=10.0)
+
+# --- 3. CARGA DE DATOS ---
 try:
-    # Traemos datos de Airtable
     df_actual = pd.DataFrame([r['fields'] for r in table_port.all()])
     df_movs = pd.DataFrame([r['fields'] for r in table_movs.all()])
     
-    # Limpieza de nombres de columnas
     df_actual.columns = [c.strip() for c in df_actual.columns]
     df_movs.columns = [c.strip() for c in df_movs.columns]
 
-    # Función para que Yahoo Finance entienda tickers con puntos (BRK.B -> BRK-B)
+    # Buscador de columna de dinero (Importe o Total Pesos)
+    col_dinero = next((c for c in df_movs.columns if c in ['Importe', 'Total Pesos', 'Monto']), None)
+    
     def limpiar_ticker(t):
         return str(t).strip().replace('.', '-')
 
-    tickers_port = df_actual['Ticker_EEUU'].unique().tolist()
-    tickers_api = [limpiar_ticker(t) for t in tickers_port]
-    
-    with st.spinner('Consultando precios en tiempo real...'):
-        if tickers_api:
-            data_now = yf.download(tickers_api, period="1d", progress=False)['Close']
-            
-            # Mapeo de precios actuales
-            if len(tickers_api) > 1:
-                precios_dict = data_now.iloc[-1].to_dict()
-            else:
-                precios_dict = {tickers_api[0]: float(data_now.iloc[-1])}
-        else:
-            precios_dict = {}
-
-    # --- SECCIÓN 1: COMPOSICIÓN ACTUAL ---
-    st.title("📊 Composición de mi Portafolio")
+    # --- 4. PROCESAMIENTO DE CARTERA ACTUAL ---
+    st.title("📊 Mi Portafolio Real")
     
     if not df_actual.empty:
-        df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].apply(lambda x: precios_dict.get(limpiar_ticker(x)))
-        df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
+        tickers_api = [limpiar_ticker(t) for t in df_actual['Ticker_EEUU'].unique()]
         
-        st.metric("Patrimonio Total Actual", f"USD {df_actual['Valuación USD'].sum():,.2f}")
+        with st.spinner('Actualizando mercado...'):
+            data_now = yf.download(tickers_api, period="1d", progress=False)['Close']
+            if len(tickers_api) > 1:
+                precios_dict = {k.replace('-', '.'): v for k, v in data_now.iloc[-1].to_dict().items()}
+            else:
+                precios_dict = {df_actual['Ticker_EEUU'].iloc[0]: float(data_now.iloc[-1])}
 
-        # Tabla interactiva
-        sel_port = st.dataframe(
-            df_actual[['Ticker_EEUU', 'Cantidad', 'Ratio', 'Valuación USD', 'Precio Hoy']],
-            use_container_width=True, on_select="rerun", selection_mode="single-row"
-        )
-    else:
-        st.warning("La tabla Portafolio está vacía.")
-        sel_port = None
-
-    # --- SECCIÓN 2: DETALLE INTERACTIVO ---
-    st.divider()
-    if sel_port and len(sel_port.selection.rows) > 0:
-        idx = sel_port.selection.rows[0]
-        t_sel = df_actual.iloc[idx]['Ticker_EEUU']
-        st.subheader(f"📑 Historial de Movimientos: {t_sel}")
+        # Calculamos análisis detallado para cada activo en cartera
+        res_cartera = []
+        for _, row in df_actual.iterrows():
+            t = row['Ticker_EEUU']
+            p_hoy = precios_dict.get(limpiar_ticker(t), 0)
+            valuacion_usd = (row['Cantidad'] / row['Ratio']) * p_hoy
+            valuacion_ars = valuacion_usd * ccl_val
+            
+            # Buscamos monto de compra en movimientos
+            m_t = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Operacion'].str.upper() == 'COMPRA')]
+            monto_compra = m_t[col_dinero].sum() if col_dinero else 0
+            
+            rendimiento = valuacion_ars - monto_compra
+            porcentaje = (rendimiento / monto_compra * 100) if monto_compra > 0 else 0
+            
+            res_cartera.append({
+                'Ticker': t,
+                'Cantidad': row['Cantidad'],
+                'Valuación USD': valuacion_usd,
+                'Monto Compra (ARS)': monto_compra,
+                'Valuación (ARS)': valuacion_ars,
+                'Rendimiento (ARS)': rendimiento,
+                '% Retorno': porcentaje
+            })
         
-        hist_filt = df_movs[df_movs['Ticker_EEUU'] == t_sel].sort_values('Fecha', ascending=False)
-        st.table(hist_filt[['Fecha', 'Operacion', 'Cantidad', 'Ratio', 'Importe']])
-    else:
-        st.info("💡 Hacé clic en una fila de la tabla superior para ver el detalle de sus operaciones.")
+        df_p = pd.DataFrame(res_cartera)
 
-    # --- SECCIÓN 3: ACTIVOS LIQUIDADOS (SOLO POR DESCRIPCIÓN) ---
+        # --- SECCIÓN 1: COMPOSICIÓN Y GRÁFICO ---
+        col_m1, col_m2 = st.columns([2, 1])
+        
+        with col_m1:
+            st.metric("Patrimonio Total Actual", f"USD {df_p['Valuación USD'].sum():,.2f}")
+            sel_port = st.dataframe(
+                df_p.style.format({
+                    'Valuación USD': '{:.2f}', 'Monto Compra (ARS)': '${:,.2f}', 
+                    'Valuación (ARS)': '${:,.2f}', 'Rendimiento (ARS)': '${:,.2f}', '% Retorno': '{:.2f}%'
+                }).applymap(lambda x: 'color: red' if x < 0 else 'color: green', subset=['Rendimiento (ARS)', '% Retorno']),
+                use_container_width=True, on_select="rerun", selection_mode="single-row"
+            )
+
+        with col_m2:
+            fig = px.pie(df_p, values='Valuación USD', names='Ticker', hole=0.4, title="Distribución de Cartera")
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # --- SECCIÓN 2: DETALLE INTERACTIVO ---
+        if len(sel_port.selection.rows) > 0:
+            idx = sel_port.selection.rows[0]
+            t_sel = df_p.iloc[idx]['Ticker']
+            st.divider()
+            st.subheader(f"📑 Historial de Operaciones: {t_sel}")
+            h_filt = df_movs[df_movs['Ticker_EEUU'] == t_sel].sort_values('Fecha', ascending=False)
+            st.table(h_filt[['Fecha', 'Operacion', 'Cantidad', col_dinero]])
+
+    # --- SECCIÓN 3: ACTIVOS LIQUIDADOS ---
     st.divider()
     st.subheader("🏁 Activos Liquidados (Ganancias Realizadas)")
     
-    tickers_en_movs = set(df_movs['Ticker_EEUU'].unique())
-    tickers_en_port = set(df_actual['Ticker_EEUU'].unique())
-    liquidados = list(tickers_en_movs - tickers_en_port)
+    tickers_en_port = set(df_actual['Ticker_EEUU'].unique()) if not df_actual.empty else set()
+    liquidados = list(set(df_movs['Ticker_EEUU'].unique()) - tickers_en_port)
 
     if liquidados:
         res_liq = []
         for t in liquidados:
             m_t = df_movs[df_movs['Ticker_EEUU'] == t].copy()
-            
-            # Normalizamos la columna Operacion
             m_t['Operacion'] = m_t['Operacion'].str.strip().str.upper()
-            
-            # Sumamos basándonos exclusivamente en el texto de la columna Operacion
-            monto_compra = m_t[m_t['Operacion'] == 'COMPRA']['Importe'].sum()
-            monto_venta = m_t[m_t['Operacion'] == 'VENTA']['Importe'].sum()
-            
-            rendimiento = monto_venta - monto_compra
-            porcentaje = (rendimiento / monto_compra) * 100 if monto_compra > 0 else 0
-            
+            m_compra = m_t[m_t['Operacion'] == 'COMPRA'][col_dinero].sum()
+            m_venta = m_t[m_t['Operacion'] == 'VENTA'][col_dinero].sum()
+            rend = m_venta - m_compra
             res_liq.append({
-                'Ticker': t,
-                'Monto de Compra': monto_compra,
-                'Monto de Venta': monto_venta,
-                'Rendimiento': rendimiento,
-                '% Retorno': porcentaje
+                'Ticker': t, 'Monto Compra': m_compra, 'Monto Venta': m_venta,
+                'Rendimiento': rend, '% Retorno': (rend/m_compra*100) if m_compra > 0 else 0
             })
         
-        df_liq = pd.DataFrame(res_liq)
-        
-        # Formato de tabla con colores
         st.dataframe(
-            df_liq.style.format({
-                'Monto de Compra': '${:,.2f}',
-                'Monto de Venta': '${:,.2f}',
-                'Rendimiento': '${:,.2f}',
-                '% Retorno': '{:.2f}%'
-            }).applymap(lambda x: 'color: red' if x < 0 else 'color: green', subset=['Rendimiento', '% Retorno']),
+            pd.DataFrame(res_liq).style.format({'Monto Compra': '${:,.2f}', 'Monto Venta': '${:,.2f}', 'Rendimiento': '${:,.2f}', '% Retorno': '{:.2f}%'})
+            .applymap(lambda x: 'color: red' if x < 0 else 'color: green', subset=['Rendimiento', '% Retorno']),
             use_container_width=True
         )
-    else:
-        st.write("No hay posiciones cerradas detectadas.")
 
 except Exception as e:
     st.error(f"Error general: {e}")
