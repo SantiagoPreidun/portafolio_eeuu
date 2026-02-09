@@ -114,20 +114,70 @@ try:
         fig_evol = px.line(evolucion, y='Valor USD', title="Evolución del Patrimonio (Base Cierres Diarios)")
         st.plotly_chart(fig_evol, use_container_width=True)
 
-    # --- SECCIÓN 3: ACTIVOS LIQUIDADOS ---
+# --- SECCIÓN 3: ACTIVOS LIQUIDADOS (CON FILA DE TOTALES) ---
     st.divider()
-    st.subheader("🏁 Activos Liquidados")
-    tickers_port = set(df_actual['Ticker_EEUU'].unique()) if not df_actual.empty else set()
-    liquidados = list(set(df_movs['Ticker_EEUU'].unique()) - tickers_port)
+    st.subheader("🏁 Activos Liquidados (Ganancias Realizadas)")
+    
+    tickers_en_movs = set(df_movs['Ticker_EEUU'].unique())
+    tickers_en_port = set(df_actual['Ticker_EEUU'].unique()) if not df_actual.empty else set()
+    liquidados = list(tickers_en_movs - tickers_en_port)
+
     if liquidados:
         res_liq = []
         for t in liquidados:
             m_t = df_movs[df_movs['Ticker_EEUU'] == t].copy()
-            c = m_t[m_t['Operacion'].str.upper() == 'COMPRA'][col_dinero].sum()
-            v = m_t[m_t['Operacion'].str.upper() == 'VENTA'][col_dinero].sum()
-            rend = v - c
-            res_liq.append({'Ticker': t, 'Monto Compra': c, 'Monto Venta': v, 'Rendimiento': rend, '% Retorno': (rend/c*100) if c > 0 else 0})
-        st.dataframe(pd.DataFrame(res_liq).style.format({'Monto Compra': '${:,.2f}', 'Monto Venta': '${:,.2f}', 'Rendimiento': '${:,.2f}', '% Retorno': '{:.2f}%'}))
+            m_t['Operacion'] = m_t['Operacion'].str.strip().str.upper()
+            
+            # Usamos la columna detectada automáticamente (col_dinero)
+            compra = m_t[m_t['Operacion'] == 'COMPRA'][col_dinero].sum()
+            venta = m_t[m_t['Operacion'] == 'VENTA'][col_dinero].sum()
+            rend = venta - compra
+            perc = (rend / compra * 100) if compra > 0 else 0
+            
+            res_liq.append({
+                'Ticker': t,
+                'Monto Compra': compra,
+                'Monto Venta': venta,
+                'Rendimiento': rend,
+                '% Retorno': perc
+            })
+        
+        df_liq = pd.DataFrame(res_liq)
 
-except Exception as e:
-    st.error(f"Error: {e}")
+        # --- CÁLCULO DE FILA DE TOTALES ---
+        total_compra = df_liq['Monto Compra'].sum()
+        total_venta = df_liq['Monto Venta'].sum()
+        total_rendimiento = total_venta - total_compra
+        total_porcentaje = (total_rendimiento / total_compra * 100) if total_compra > 0 else 0
+
+        # Creamos la fila de total como un nuevo DataFrame para concatenar
+        df_total = pd.DataFrame([{
+            'Ticker': 'TOTAL GLOBAL',
+            'Monto Compra': total_compra,
+            'Monto Venta': total_venta,
+            'Rendimiento': total_rendimiento,
+            '% Retorno': total_porcentaje
+        }])
+
+        # Unimos los datos con la fila de totales
+        df_final_liq = pd.concat([df_liq, df_total], ignore_index=True)
+
+        # Estilo visual: resaltamos la última fila (Totales)
+        def highlight_total(s):
+            is_total = s['Ticker'] == 'TOTAL GLOBAL'
+            return ['font-weight: bold; background-color: #1e1e1e' if is_total else '' for _ in s]
+
+        st.dataframe(
+            df_final_liq.style.format({
+                'Monto Compra': '${:,.2f}',
+                'Monto Venta': '${:,.2f}',
+                'Rendimiento': '${:,.2f}',
+                '% Retorno': '{:.2f}%'
+            })
+            .apply(highlight_total, axis=1)
+            .applymap(lambda x: 'color: red' if isinstance(x, (int, float)) and x < 0 else ('color: green' if isinstance(x, (int, float)) and x > 0 else ''), 
+                      subset=['Rendimiento', '% Retorno']),
+            use_container_width=True
+        )
+    else:
+        st.write("No hay posiciones cerradas detectadas.")
