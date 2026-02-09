@@ -60,51 +60,58 @@ try:
             m_t = df_movs[df_movs['Ticker_EEUU'] == t_sel].sort_values('Fecha', ascending=False)
             st.table(m_t[['Fecha', 'Operacion', 'Cantidad', col_dinero]])
 
-    # --- NUEVA SECCIÓN: EVOLUCIÓN HISTÓRICA DE CARTERA ACTIVA ---
+    # --- SECCIÓN: EVOLUCIÓN HISTÓRICA SINCRONIZADA ---
     st.divider()
     st.subheader("📈 Evolución de Cartera Activa (USD)")
 
-    with st.spinner('Reconstruyendo historial de precios...'):
-        # 1. Definir rango de fechas (desde la primera compra hasta hoy)
+    with st.spinner('Sincronizando historial con valor actual...'):
         df_movs['Fecha'] = pd.to_datetime(df_movs['Fecha'])
         fecha_inicio = df_movs['Fecha'].min()
         fecha_fin = datetime.datetime.now()
         
-        # 2. Obtener precios históricos de todos los tickers activos
+        # Descarga masiva
         hist_precios = yf.download(tickers_api, start=fecha_inicio, end=fecha_fin, progress=False)['Close']
-        if len(tickers_api) == 1:
-            hist_precios = hist_precios.to_frame()
-            hist_precios.columns = tickers_api
-
-        # 3. Crear DataFrame diario de tenencia
-        rango_dias = pd.date_range(start=fecha_inicio, end=fecha_fin)
-        evolucion = pd.DataFrame(index=rango_dias)
         
+        # Si es un solo ticker, yfinance devuelve una Serie, la pasamos a DataFrame
+        if isinstance(hist_precios, pd.Series):
+            hist_precios = hist_precios.to_frame()
+            hist_precios.columns = [tickers_api[0]]
+        
+        # Limpiamos los nombres de las columnas del historial (de BRK-B a BRK.B)
+        hist_precios.columns = [c.replace('-', '.') for c in hist_precios.columns]
+
+        rango_dias = pd.date_range(start=fecha_inicio, end=fecha_fin)
         valor_diario_total = []
+        
         for dia in rango_dias:
             total_dia = 0
             for _, row in df_actual.iterrows():
-                # Cuántos nominales tenías a esa fecha según Movimientos
-                movs_hasta_hoy = df_movs[(df_movs['Ticker_EEUU'] == row['Ticker_EEUU']) & (df_movs['Fecha'] <= dia)]
-                cant_a_fecha = 0
-                for _, m in movs_hasta_hoy.iterrows():
-                    if m['Operacion'].upper() == 'COMPRA': cant_a_fecha += m['Cantidad']
-                    else: cant_a_fecha -= m['Cantidad']
+                t = row['Ticker_EEUU']
+                # Cantidad neta a esa fecha
+                m_h = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Fecha'] <= dia)]
+                c_h = m_h[m_h['Operacion'].str.upper() == 'COMPRA']['Cantidad'].sum()
+                v_h = m_h[m_h['Operacion'].str.upper() == 'VENTA']['Cantidad'].sum()
+                tenencia_dia = (c_h - v_h)
                 
-                # Buscar precio histórico más cercano
-                t_api = fix_ticker_api(row['Ticker_EEUU'])
-                if t_api in hist_precios.columns:
-                    precio_h = hist_precios.loc[:dia, t_api].iloc[-1] if not hist_precios.loc[:dia, t_api].empty else 0
-                    total_dia += (cant_a_fecha / row['Ratio']) * precio_h
+                if t in hist_precios.columns:
+                    # Buscamos el precio de ese día o el anterior más cercano (ffill)
+                    precios_hasta_dia = hist_precios.loc[:dia, t]
+                    if not precios_hasta_dia.empty:
+                        precio_h = precios_hasta_dia.iloc[-1]
+                        if pd.isna(precio_h): # Si es un feriado, buscamos hacia atrás
+                             precio_h = precios_hasta_dia.ffill().iloc[-1]
+                        total_dia += (tenencia_dia / row['Ratio']) * precio_h
             
             valor_diario_total.append(total_dia)
         
-        evolucion['Valor Cartera USD'] = valor_diario_total
+        evolucion = pd.DataFrame(index=rango_dias)
+        evolucion['Valor USD'] = valor_diario_total
         
-        # 4. Graficar
-        fig_evol = px.line(evolucion, y='Valor Cartera USD', title="Valor Histórico del Portafolio en Dólares",
-                           labels={'index': 'Fecha', 'Valor Cartera USD': 'USD Total'})
-        fig_evol.update_traces(line_color='#00CC96')
+        # FORZAMOS EL ÚLTIMO PUNTO: 
+        # Si hoy el mercado está cerrado, el último valor del gráfico debe ser igual al Patrimonio Total
+        evolucion.iloc[-1, evolucion.columns.get_loc('Valor USD')] = df_actual['Valuación USD'].sum()
+
+        fig_evol = px.line(evolucion, y='Valor USD', title="Evolución del Patrimonio (Base Cierres Diarios)")
         st.plotly_chart(fig_evol, use_container_width=True)
 
     # --- SECCIÓN 3: ACTIVOS LIQUIDADOS ---
