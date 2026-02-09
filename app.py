@@ -43,7 +43,7 @@ def fix_ticker(t):
 
 # --- 2. EJECUCIÓN PRINCIPAL ---
 try:
-    # Carga de datos desde Airtable
+    # Carga de datos
     df_actual = pd.DataFrame([r['fields'] for r in table_port.all()])
     df_movs = pd.DataFrame([r['fields'] for r in table_movs.all()])
     df_actual.columns = [c.strip() for c in df_actual.columns]
@@ -51,7 +51,7 @@ try:
     
     col_dinero = next((c for c in df_movs.columns if c in ['Importe', 'Total Pesos', 'Monto']), 'Importe')
 
-    # --- SECCIÓN 1: TENENCIA ACTUAL CON RETORNO (%) ---
+    # --- SECCIÓN 1: TENENCIA ACTUAL CON RETORNO ---
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">💼 Mi Portafolio (Tenencia Actual)</div>', unsafe_allow_html=True)
     
@@ -68,23 +68,26 @@ try:
             df_actual['Precio Hoy'] = df_actual['Ticker_EEUU'].map(precios_dict)
             df_actual['Valuación USD'] = (df_actual['Cantidad'] / df_actual['Ratio']) * df_actual['Precio Hoy']
             
-            # Cálculo de Retorno Totalizado por Posición
+            # Cálculo de Retorno Robusto
             rets_posicion = []
             for _, row in df_actual.iterrows():
                 t = row['Ticker_EEUU']
-                # Buscamos solo compras de este activo
-                m_t = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Operacion'].str.strip().str.upper() == 'COMPRA')]
+                m_t = df_movs[(df_movs['Ticker_EEUU'] == t) & (df_movs['Operacion'].str.upper() == 'COMPRA')]
                 
                 costo_total_usd = 0
-                for _, op in m_t.iterrows():
-                    try:
-                        # Buscamos precio histórico en USD para dolarizar la compra
-                        fecha_dt = pd.to_datetime(op['Fecha'])
-                        h_p = yf.download(fix_ticker(t), start=fecha_dt, end=fecha_dt + datetime.timedelta(days=4), progress=False)['Close']
-                        p_c = h_p.iloc[0] if not h_p.empty else row['Precio Hoy']
-                        costo_total_usd += (op['Cantidad'] / op['Ratio']) * p_c
-                    except:
-                        costo_total_usd += 0
+                if not m_t.empty:
+                    # Descargamos todo el historial del ticker una sola vez para evitar múltiples llamadas
+                    h_p = yf.download(fix_ticker(t), start=m_t['Fecha'].min(), progress=False)['Close']
+                    
+                    for _, op in m_t.iterrows():
+                        try:
+                            # Buscamos el precio más cercano a la fecha de compra
+                            p_c = h_p.loc[:op['Fecha']].ffill().iloc[-1]
+                            # Si p_c sigue siendo una serie (raro), tomamos el primer valor
+                            if isinstance(p_c, pd.Series): p_c = p_c.iloc[0]
+                            costo_total_usd += (op['Cantidad'] / op['Ratio']) * p_c
+                        except:
+                            costo_total_usd += (op['Cantidad'] / op['Ratio']) * row['Precio Hoy']
                 
                 ret_perc = ((row['Valuación USD'] / costo_total_usd) - 1) * 100 if costo_total_usd > 0 else 0
                 rets_posicion.append(ret_perc)
@@ -105,7 +108,7 @@ try:
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- SECCIÓN 2: DETALLE 100% USD (DRILL-DOWN) ---
-    if len(sel_port.selection.rows) > 0:
+    if 'sel_port' in locals() and len(sel_port.selection.rows) > 0:
         idx = sel_port.selection.rows[0]
         row_sel = df_actual.iloc[idx]
         t_sel = row_sel['Ticker_EEUU']
@@ -120,7 +123,7 @@ try:
         detalles = []
         for _, op in m_t_det.iterrows():
             try:
-                p_c = h_prices_det.loc[:op['Fecha']].iloc[-1]
+                p_c = h_prices_det.loc[:op['Fecha']].ffill().iloc[-1]
                 if isinstance(p_c, pd.Series): p_c = p_c.iloc[0]
             except:
                 p_c = row_sel['Precio Hoy']
@@ -128,10 +131,10 @@ try:
             c_usa = op['Cantidad'] / op['Ratio']
             detalles.append({
                 'Fecha': op['Fecha'].strftime('%d/%m/%Y'),
-                'Operación': op['Operacion'].upper(),
-                'Acciones (USA)': c_usa,
+                'Operación': str(op['Operacion']).upper(),
+                'Acciones (USA)': float(c_usa),
                 'Precio Compra (USD)': float(p_c),
-                'Rendimiento (%)': float(((row_sel['Precio Hoy'] / p_c) - 1) * 100)
+                'Rendimiento (%)': float(((row_sel['Precio Hoy'] / p_c) - 1) * 100) if p_c > 0 else 0
             })
         
         st.dataframe(pd.DataFrame(detalles).style.format({'Acciones (USA)': '{:.4f}', 'Precio Compra (USD)': '${:,.2f}', 'Rendimiento (%)': '{:.2f}%'})
@@ -144,7 +147,9 @@ try:
     
     @st.cache_data(ttl=3600)
     def calcular_evol_estatica(_movs, _port, _tapi):
-        f_i = pd.to_datetime(_movs['Fecha']).min()
+        df_m = _movs.copy()
+        df_m['Fecha'] = pd.to_datetime(df_m['Fecha'])
+        f_i = df_m['Fecha'].min()
         hp = yf.download(_tapi, start=f_i, progress=False)['Close']
         if isinstance(hp, pd.Series): hp = hp.to_frame(); hp.columns = _tapi
         hp.columns = [c.replace('-', '.') for c in hp.columns]
@@ -155,15 +160,17 @@ try:
             s_dia = 0
             for _, asset in _port.iterrows():
                 tk = asset['Ticker_EEUU']
-                m_h = _movs[(_movs['Ticker_EEUU'] == tk) & (pd.to_datetime(_movs['Fecha']) <= d)]
+                m_h = df_m[(df_m['Ticker_EEUU'] == tk) & (df_m['Fecha'] <= d)]
                 q = m_h[m_h['Operacion'].str.upper()=='COMPRA']['Cantidad'].sum() - m_h[m_h['Operacion'].str.upper()=='VENTA']['Cantidad'].sum()
                 if tk in hp.columns:
-                    p = hp.loc[:d, tk].ffill().iloc[-1] if not hp.loc[:d, tk].empty else 0
+                    # Uso de ffill().iloc[-1] para evitar errores de ambigüedad
+                    precios_act = hp.loc[:d, tk].ffill()
+                    p = precios_act.iloc[-1] if not precios_act.empty else 0
                     s_dia += (q / asset['Ratio']) * p
             ev.append(s_dia)
         return pd.DataFrame({'USD': ev}, index=rango)
 
-    df_ev = calcular_evol_estatica(df_movs, df_actual, [fix_ticker(t) for t in df_actual['Ticker_EEUU'].unique()])
+    df_ev = calcular_evol_estatica(df_movs, df_actual, tickers_api)
     df_ev.iloc[-1] = df_actual['Valuación USD'].sum()
     st.plotly_chart(px.area(df_ev, y='USD', template="plotly_dark", color_discrete_sequence=['#00cc96']), use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
